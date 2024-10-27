@@ -13,7 +13,7 @@ bot = telebot.TeleBot(API_TOKEN)
 conn = sqlite3.connect('tasks.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS tasks
-                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, teacher TEXT, subject TEXT, due_date TEXT, notification_time TEXT, reminder_days INTEGER)''')
+                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, teacher TEXT, subject TEXT, due_date TEXT, notification_time TEXT)''')
 conn.commit()
 
 
@@ -21,19 +21,27 @@ conn.commit()
 def send_reminders():
     while True:
         now = datetime.datetime.now()
-        cursor.execute('SELECT chat_id, subject, notification_time FROM tasks')
+        cursor.execute('SELECT id, chat_id, subject, due_date, notification_time FROM tasks')
         rows = cursor.fetchall()
         for row in rows:
-            chat_id, subject, notification_time = row
+            task_id, chat_id, subject, due_date_str, notification_time = row
+            due_date = datetime.datetime.strptime(due_date_str, '%d.%m.%Y')
             notification_datetime = datetime.datetime.strptime(notification_time, '%d.%m.%Y %H:%M')
+
+            # Отправляем напоминание в указанное пользователем время
             if now >= notification_datetime:
                 bot.send_message(chat_id,
-                                 f'Напоминание: У вас есть предмет {subject}, время для оповещения: {notification_datetime}.')
+                                 f'Напоминание: Дружище, пора поднажать у тебя долг по {subject}, время для оповещения: {notification_datetime}.')
 
-                # Удаляем задачу после отправки напоминания, чтобы не отправлять повторно
-                cursor.execute('DELETE FROM tasks WHERE chat_id=? AND notification_time=?',
-                               (chat_id, notification_time))
+                # Удаляем задачу после отправки напоминания
+                cursor.execute('DELETE FROM tasks WHERE id=?', (task_id,))
                 conn.commit()
+
+            # Отправляем напоминание за день до дедлайна, если задача не удалена
+            elif now >= due_date - datetime.timedelta(days=1) and now < due_date:
+                bot.send_message(chat_id,
+                                 f'Напоминание: Дружище, у тебя должок горит, давай поднажми {subject}.')
+
         time.sleep(60)  # Проверяем каждую минуту
 
 
@@ -67,48 +75,39 @@ def run_bot(message):
     func=lambda message: message.text not in ["Запустить бота", "Помощь", "Посмотреть долги", "Удалить долг"])
 def add_task(message):
     try:
-        # Попробуем разделить строку на части
         parts = message.text.split(", ")
-        if len(parts) != 5:
+        if len(parts) != 4:
             raise ValueError(
-                "Неверное количество параметров. Убедитесь, что вводите в формате: Преподаватель, Предмет, Дата дедлайна (ДД.ММ.ГГГГ), Время оповещения (ЧЧ:ММ), Дней до напоминания.")
+                "Неверное количество параметров. Убедитесь, что вводите в формате: Преподаватель, Предмет, Дата дедлайна (ДД.ММ.ГГГГ), Время оповещения (ДД.ММ.ГГГГ ЧЧ:ММ).")
 
         teacher = parts[0]
         subject = parts[1]
         due_date_str = parts[2].strip()  # Дата дедлайна
         notification_time_str = parts[3].strip()  # Время оповещения
-        reminder_days = int(parts[4].strip())  # Дней до напоминания
 
-        # Сохраняем дату дедлайна и рассчитываем время уведомления
         due_date = datetime.datetime.strptime(due_date_str, '%d.%m.%Y')
-        notification_time = datetime.datetime.strptime(notification_time_str, '%H:%M')
+        notification_datetime = datetime.datetime.strptime(notification_time_str, '%d.%m.%Y %H:%M')
 
-        # Вычисляем время для оповещения
-        notify_datetime = due_date - datetime.timedelta(days=reminder_days)
-        notify_datetime = notify_datetime.replace(hour=notification_time.hour, minute=notification_time.minute)
-
-        # Сохранение задачи в базу данных
         cursor.execute(
-            'INSERT INTO tasks (chat_id, teacher, subject, due_date, notification_time, reminder_days) VALUES (?, ?, ?, ?, ?, ?)',
-            (
-            message.chat.id, teacher, subject, due_date_str, notify_datetime.strftime('%d.%m.%Y %H:%M'), reminder_days))
+            'INSERT INTO tasks (chat_id, teacher, subject, due_date, notification_time) VALUES (?, ?, ?, ?, ?)',
+            (message.chat.id, teacher, subject, due_date_str, notification_datetime.strftime('%d.%m.%Y %H:%M')))
         conn.commit()
 
         bot.send_message(message.chat.id, "Задача добавлена!")
     except Exception as e:
         bot.send_message(message.chat.id, f"Ошибка: {e}. Убедитесь, что информация введена в правильном формате:\n"
-                                          "Пример: Иванов, Математика, 26.10.2024, 14:40, 2")
+                                          "Пример: Иванов, Математика, 26.10.2024, 25.10.2024 14:40")
 
 
 # Команда /help
 @bot.message_handler(func=lambda message: message.text == "Помощь")
 def help_command(message):
     bot.send_message(message.chat.id,
-                                      "Введите информацию в формате:\n"
-                                      "Преподаватель, Предмет, Дата дедлайна (ДД.ММ.ГГГГ), Время оповещения (ЧЧ:ММ), Дней до напоминания.")
+                     "Введите информацию в формате:\n"
+                     "Преподаватель, Предмет, Дата дедлайна (ДД.ММ.ГГГГ), Время оповещения (ДД.ММ.ГГГГ ЧЧ:ММ).")
 
 
-## Команда /view
+# Команда /view
 @bot.message_handler(func=lambda message: message.text == "Посмотреть долги")
 def view_command(message):
     cursor.execute('SELECT subject FROM tasks WHERE chat_id=?', (message.chat.id,))
@@ -118,7 +117,6 @@ def view_command(message):
     else:
         response = "Ты красавчик, на твоем счету нет ни одного долга!"
     bot.send_message(message.chat.id, response)
-
 
 
 # Команда /delete
@@ -143,7 +141,7 @@ def confirm_delete(call):
     cursor.execute('DELETE FROM tasks WHERE id=? AND chat_id=?', (task_id, call.message.chat.id))
     if cursor.rowcount > 0:
         conn.commit()
-        bot.send_message(call.message.chat.id, "Долг удален!, ты справился с этим, дружище! Ты большой молодец, продолжай дерзать гранит науки и диплом будет у тебя на полке!")
+        bot.send_message(call.message.chat.id, "Долг удален! Ты справился с этим, дружище! Продолжай дерзать!")
     else:
         bot.send_message(call.message.chat.id, "Ошибка: такой долг не найден.")
 
@@ -151,6 +149,9 @@ def confirm_delete(call):
 # Запуск потока для напоминаний
 reminder_thread = threading.Thread(target=send_reminders)
 reminder_thread.start()
+
+# Отключаем webhook
+bot.remove_webhook()
 
 # Запуск бота
 bot.polling(none_stop=True)
